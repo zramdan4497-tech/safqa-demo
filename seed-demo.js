@@ -28,6 +28,15 @@ async function user(name, email, phone, role) {
     const r = await call('/api/listings', { category, deal, title, description, price, negotiable, city, phone: '0100000000' }, c);
     ids.push(r.json.id);
   }
+  const fs = require('fs');
+  const owners = [seller, seller, seller, seller2, seller2, seller2, seller2];
+  const real = ids.map((id, i) => [id, owners[i]]).filter(x => x[0]);
+  for (let i = 0; i < real.length; i++) {
+    const f = __dirname + '/seed-photos/' + (i % 6) + '.jpg.b64';
+    if (!fs.existsSync(f)) continue;
+    const buf = Buffer.from(fs.readFileSync(f, 'utf8'), 'base64');
+    await fetch(base + '/api/photo?listing=' + real[i][0], { method: 'POST', headers: { cookie: real[i][1] }, body: buf });
+  }
   await call('/api/offer', { id: ids[0], amount: 620000, message: 'مهتم، ممكن نتقابل؟' }, buyer);
   await call('/api/fav', { id: ids[1] }, buyer);
   console.log('seeded', ids.filter(Boolean).length, 'listings. Demo logins (password demo1234): seller@demo.safqa, seller2@demo.safqa, buyer@demo.safqa');
