@@ -10,6 +10,9 @@ const { DatabaseSync } = require('node:sqlite');
 const PORT = process.env.PORT || 3000;
 const PRO_PRICE = 200;        // EGP / month, pro-seller tier
 const FEATURE_PRICE = 50;     // EGP / 7 days, featured listing
+const MAX_PHOTOS = 6, MAX_PHOTO_BYTES = 800 * 1024;
+const UPLOADS = path.join(path.dirname(process.env.DB || __dirname + '/x'), 'uploads');
+fs.mkdirSync(UPLOADS, { recursive: true });
 const FREE_LIMIT = 3;         // active listings for free sellers
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'zozalaaziad426@gmail.com').toLowerCase();
 const PAY_INFO = process.env.PAY_INFO || 'InstaPay: 01212973759';
@@ -23,6 +26,7 @@ CREATE TABLE IF NOT EXISTS listings(id INTEGER PRIMARY KEY, uid INTEGER, categor
   price REAL, negotiable INTEGER, phone TEXT, city TEXT, status TEXT DEFAULT 'active', created INTEGER, featured_until INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS offers(id INTEGER PRIMARY KEY, listing_id INTEGER, uid INTEGER, amount REAL, message TEXT, phone TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, uid INTEGER, kind TEXT, listing_id INTEGER, amount REAL, reference TEXT, status TEXT DEFAULT 'pending', created INTEGER);
+CREATE TABLE IF NOT EXISTS photos(id INTEGER PRIMARY KEY, listing_id INTEGER, file TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS favs(uid INTEGER, listing_id INTEGER, PRIMARY KEY(uid,listing_id));
 `);
 const CATS = ['cars', 'realestate', 'rentals'];
@@ -58,7 +62,39 @@ const send = (res, code, obj, headers = {}) => {
 const fail = (res, code, msg) => send(res, code, { error: msg });
 const attrib = l => l && ({ ...l, negotiable: !!l.negotiable, featured: l.featured_until > now(), pro: !!l.pro });
 
+function delPhotos(lid, only) {
+  for (const p of q(only ? 'SELECT * FROM photos WHERE listing_id=? AND id=?' : 'SELECT * FROM photos WHERE listing_id=?', ...(only ? [lid, only] : [lid]))) {
+    try { fs.unlinkSync(path.join(UPLOADS, p.file)); } catch {}
+    run('DELETE FROM photos WHERE id=?', p.id);
+  }
+}
+function rawBody(req, max) {
+  return new Promise((res, rej) => {
+    const ch = []; let n = 0;
+    req.on('data', c => { n += c.length; if (n <= max) ch.push(c); }); // keep reading so the 413 reply can be delivered
+    req.on('end', () => (n > max ? rej(new Error('big')) : res(Buffer.concat(ch))));
+    req.on('error', rej);
+  });
+}
 const routes = {
+  'POST /api/photo': async (req, res, url) => {
+    const u = user(req); if (!u) return fail(res, 401, 'سجل دخول');
+    const l = one('SELECT * FROM listings WHERE id=? AND uid=?', +url.searchParams.get('listing'), u.id);
+    if (!l) return fail(res, 404, 'الإعلان مش موجود');
+    if (one('SELECT count(*) c FROM photos WHERE listing_id=?', l.id).c >= MAX_PHOTOS) return fail(res, 400, `الحد الأقصى ${MAX_PHOTOS} صور`);
+    let buf; try { buf = await rawBody(req, MAX_PHOTO_BYTES); } catch { return fail(res, 413, 'الصورة كبيرة (الحد 800 كيلوبايت)'); }
+    if (buf.length < 100 || buf[0] !== 0xFF || buf[1] !== 0xD8 || buf[2] !== 0xFF) return fail(res, 400, 'لازم الصورة تكون JPEG');
+    const file = crypto.randomBytes(12).toString('hex') + '.jpg';
+    fs.writeFileSync(path.join(UPLOADS, file), buf);
+    const r = run('INSERT INTO photos(listing_id,file,created) VALUES(?,?,?)', l.id, file, now());
+    send(res, 201, { id: Number(r.lastInsertRowid) });
+  },
+  'POST /api/photo/delete': async (req, res) => {
+    const u = user(req); if (!u) return fail(res, 401, 'سجل دخول');
+    const b = await body(req), l = one('SELECT * FROM listings WHERE id=? AND uid=?', +b.listing, u.id);
+    if (!l) return fail(res, 404, 'مش موجود');
+    delPhotos(l.id, +b.id); send(res, 200, { ok: true });
+  },
   'POST /api/signup': async (req, res) => {
     const b = await body(req);
     const name = clean(b.name, 80), email = clean(b.email, 120).toLowerCase(), phone = clean(b.phone, 20), pw = String(b.password || '');
@@ -100,7 +136,7 @@ const routes = {
     if (p.get('max')) { where.push('l.price<=?'); a.push(+p.get('max')); }
     if (p.get('negotiable') === '1') where.push('l.negotiable=1');
     if (p.get('mine')) { const u = user(req); if (!u) return fail(res, 401, 'سجل دخول'); where.splice(0, 1, 'l.uid=?'); a.unshift(u.id); }
-    const rows = q(`SELECT l.*, u.name seller, (u.pro_until>${now()}) pro FROM listings l JOIN users u ON u.id=l.uid WHERE ${where.join(' AND ')} ORDER BY (l.featured_until>${now()}) DESC, l.created DESC LIMIT 100`, ...a);
+    const rows = q(`SELECT l.*, u.name seller, (u.pro_until>${now()}) pro, (SELECT min(id) FROM photos WHERE listing_id=l.id) cover, (SELECT count(*) FROM photos WHERE listing_id=l.id) nphotos FROM listings l JOIN users u ON u.id=l.uid WHERE ${where.join(' AND ')} ORDER BY (l.featured_until>${now()}) DESC, l.created DESC LIMIT 100`, ...a);
     // phone is only revealed on the detail endpoint to logged-in users
     send(res, 200, { listings: rows.map(r => { const o = attrib(r); delete o.phone; return o; }) });
   },
@@ -118,11 +154,12 @@ const routes = {
     send(res, 201, { id: Number(r.lastInsertRowid) });
   },
   'GET /api/listing': async (req, res, url) => {
-    const l = one('SELECT l.*, u.name seller, (u.pro_until>?) pro FROM listings l JOIN users u ON u.id=l.uid WHERE l.id=?', now(), +url.searchParams.get('id'));
+    const l = one('SELECT l.*, u.name seller, (u.pro_until>?) pro, (SELECT min(id) FROM photos WHERE listing_id=l.id) cover FROM listings l JOIN users u ON u.id=l.uid WHERE l.id=?', now(), +url.searchParams.get('id'));
     if (!l) return fail(res, 404, 'الإعلان مش موجود');
     const u = user(req), o = attrib(l);
     if (!u) delete o.phone;
     o.mine = !!u && u.id === l.uid;
+    o.photos = q('SELECT id FROM photos WHERE listing_id=? ORDER BY id', l.id).map(r => r.id);
     o.fav = !!u && !!one('SELECT 1 x FROM favs WHERE uid=? AND listing_id=?', u.id, l.id);
     if (o.mine) o.offers = q('SELECT o.*, u.name buyer FROM offers o JOIN users u ON u.id=o.uid WHERE listing_id=? ORDER BY created DESC', l.id);
     send(res, 200, { listing: o });
@@ -131,7 +168,7 @@ const routes = {
     const u = user(req); if (!u) return fail(res, 401, 'سجل دخول');
     const b = await body(req), l = one('SELECT * FROM listings WHERE id=? AND uid=?', +b.id, u.id);
     if (!l) return fail(res, 404, 'مش موجود');
-    if (b.action === 'delete') run('DELETE FROM listings WHERE id=?', l.id);
+    if (b.action === 'delete') { delPhotos(l.id); run('DELETE FROM listings WHERE id=?', l.id); }
     else if (b.action === 'sold') run("UPDATE listings SET status='sold' WHERE id=?", l.id);
     else if (b.action === 'price' && +b.price > 0) run('UPDATE listings SET price=?, negotiable=? WHERE id=?', +b.price, b.negotiable ? 1 : 0, l.id);
     send(res, 200, { ok: true });
@@ -155,7 +192,7 @@ const routes = {
   },
   'GET /api/favs': async (req, res) => {
     const u = user(req); if (!u) return fail(res, 401, 'سجل دخول');
-    send(res, 200, { listings: q(`SELECT l.*, u.name seller, (u.pro_until>${now()}) pro FROM favs f JOIN listings l ON l.id=f.listing_id JOIN users u ON u.id=l.uid WHERE f.uid=?`, u.id).map(r => { const o = attrib(r); delete o.phone; return o; }) });
+    send(res, 200, { listings: q(`SELECT l.*, u.name seller, (u.pro_until>${now()}) pro, (SELECT min(id) FROM photos WHERE listing_id=l.id) cover, (SELECT count(*) FROM photos WHERE listing_id=l.id) nphotos FROM favs f JOIN listings l ON l.id=f.listing_id JOIN users u ON u.id=l.uid WHERE f.uid=?`, u.id).map(r => { const o = attrib(r); delete o.phone; return o; }) });
   },
   'POST /api/pay': async (req, res) => {
     const u = user(req); if (!u) return fail(res, 401, 'سجل دخول');
@@ -204,6 +241,13 @@ http.createServer(async (req, res) => {
   try {
     const h = routes[`${req.method} ${url.pathname}`];
     if (h) return await h(req, res, url);
+    const pm = /^\/photo\/(\d+)$/.exec(url.pathname);
+    if (pm) {
+      const p = one('SELECT file FROM photos WHERE id=?', +pm[1]);
+      if (!p) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+      return fs.createReadStream(path.join(UPLOADS, p.file)).pipe(res);
+    }
     if (url.pathname.startsWith('/api/')) return fail(res, 404, 'not found');
     let f = path.join(__dirname, 'public', url.pathname === '/' ? 'index.html' : url.pathname);
     if (!f.startsWith(path.join(__dirname, 'public')) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(__dirname, 'public', 'index.html');
