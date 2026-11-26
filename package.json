@@ -1,0 +1,1 @@
+{"name":"safqa","version":"1.0.0","description":"صفقة - سوق السماسرة","scripts":{"start":"node --no-warnings server.js"},"engines":{"node":">=22.5"}}
