@@ -15,8 +15,24 @@ async function loadMe() {
     : `<a href="#/browse">تصفح</a><a href="#/plans">الباقات</a><a href="#/login">دخول</a><a class="cta" href="#/signup">حساب جديد</a>`;
   $('#banner').innerHTML = me && me.pro ? `<div class="b">✔ حساب محترف</div>` : '';
 }
+// Compress an image file to JPEG (max 1280px, quality ~0.75, <= ~700KB) in the browser.
+async function compress(file) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height)), c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  for (let q = 0.78; q > 0.3; q -= 0.12) { const b = await new Promise(r => c.toBlob(r, 'image/jpeg', q)); if (b.size <= 700 * 1024) return b; }
+  throw new Error('الصورة كبيرة جدًا');
+}
+async function uploadPhotos(listing, files) {
+  for (const f of files) {
+    const blob = await compress(f);
+    const r = await fetch('/api/photo?listing=' + listing, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+    if (!r.ok) throw new Error((await r.json()).error);
+  }
+}
 function card(l) {
-  return `<a class="card ${l.featured ? 'feat' : ''}" href="#/l/${l.id}"><div class="thumb">${CAT[l.category][0]}</div><div class="in">
+  return `<a class="card ${l.featured ? 'feat' : ''}" href="#/l/${l.id}"><div class="thumb">${l.cover ? `<img loading="lazy" src="/photo/${l.cover}" alt="">` : CAT[l.category][0]}${l.nphotos > 1 ? `<span class="np">📷 ${l.nphotos}</span>` : ''}</div><div class="in">
   <h3>${esc(l.title)}</h3><div class="price">${money(l.price)}${l.deal === 'rent' ? ' <small>/ شهر</small>' : ''}</div>
   <div>${l.featured ? '<span class="tag f">⭐ مميز</span>' : ''}${l.pro ? '<span class="tag p">✔ محترف</span>' : ''}${l.negotiable ? '<span class="tag">قابل للتفاوض</span>' : '<span class="tag g">سعر ثابت</span>'}<span class="tag g">${CAT[l.category][1]}</span>${l.status === 'sold' ? '<span class="tag s">تم</span>' : ''}</div>
   <div class="small">📍 ${esc(l.city || '—')} · ${esc(l.seller || '')}</div></div></a>`;
@@ -53,18 +69,21 @@ const pages = {
   async l(id) {
     const { listing: l } = await api('listing?id=' + id);
     app.innerHTML = `<div class="panel"><a href="#/browse" class="small">← رجوع</a><div class="row" style="align-items:start"><div style="flex:2">
-    <h1 style="margin:6px 0">${esc(l.title)}</h1><div>${l.negotiable ? '<span class="tag">قابل للتفاوض</span>' : '<span class="tag g">سعر ثابت</span>'}<span class="tag g">${CAT[l.category][0]} ${CAT[l.category][1]}</span><span class="tag g">${l.deal === 'rent' ? 'إيجار' : 'بيع'}</span>${l.featured ? '<span class="tag f">⭐ مميز</span>' : ''}${l.pro ? '<span class="tag p">✔ سمسار محترف</span>' : ''}</div>
+    ${l.photos.length ? `<div class="gal"><img class="main" id="gm" src="/photo/${l.photos[0]}" alt=""><div class="ths">${l.photos.map((p, i) => `<img src="/photo/${p}" data-p="${p}" class="${i ? '' : 'on'}" alt="">`).join('')}</div></div>` : ''}<h1 style="margin:6px 0">${esc(l.title)}</h1><div>${l.negotiable ? '<span class="tag">قابل للتفاوض</span>' : '<span class="tag g">سعر ثابت</span>'}<span class="tag g">${CAT[l.category][0]} ${CAT[l.category][1]}</span><span class="tag g">${l.deal === 'rent' ? 'إيجار' : 'بيع'}</span>${l.featured ? '<span class="tag f">⭐ مميز</span>' : ''}${l.pro ? '<span class="tag p">✔ سمسار محترف</span>' : ''}</div>
     <p>${esc(l.description) || '<span class="mut">بدون وصف</span>'}</p><p class="small">📍 ${esc(l.city || '—')} · البائع: ${esc(l.seller)}</p></div>
     <div style="flex:1" class="plan"><div class="price">${money(l.price)}${l.deal === 'rent' ? ' / شهر' : ''}</div>
     ${l.phone ? `<p>📞 <a href="tel:${esc(l.phone)}" dir="ltr"><b>${esc(l.phone)}</b></a></p>` : `<p class="small">🔒 <a href="#/login">سجل دخول</a> عشان يظهر رقم التليفون</p>`}
     ${me && !l.mine ? `<button class="btn ghost" id="fav">${l.fav ? '★ في المفضلة' : '☆ أضف للمفضلة'}</button>` : ''}</div></div></div>
-    ${l.mine ? `<div class="panel"><h3>إدارة الإعلان</h3><button class="btn" id="sold">تم البيع</button> <button class="btn red" id="del">حذف</button> <a class="btn gold" href="#/promote/${l.id}">⭐ ميّز الإعلان</a>
+    ${l.mine ? `<div class="panel"><h3>إدارة الإعلان</h3><div class="pprev">${l.photos.map(p => `<div><img src="/photo/${p}" alt=""><button data-dp="${p}" title="حذف">×</button></div>`).join('')}</div>${l.photos.length < 6 ? `<label class="btn ghost" style="display:inline-block;margin:0 0 10px">📷 أضف صور<input type="file" id="addp" accept="image/*" multiple hidden></label><br>` : ''}<button class="btn" id="sold">تم البيع</button> <button class="btn red" id="del">حذف</button> <a class="btn gold" href="#/promote/${l.id}">⭐ ميّز الإعلان</a>
       <h3>العروض (${l.offers.length})</h3>${l.offers.map(o => `<div class="offer"><b>${money(o.amount)}</b> من ${esc(o.buyer)} · <span dir="ltr">${esc(o.phone)}</span><div class="mut">${esc(o.message)}</div></div>`).join('') || '<p class="mut">لسه مفيش عروض.</p>'}</div>`
     : l.negotiable && l.status === 'active' ? `<div class="panel"><h3>قدّم عرضك</h3><form id="of"><div class="row"><div><label>عرضك (ج.م)</label><input name="amount" type="number" required></div>
       <div><label>رقم تليفونك</label><input name="phone" dir="ltr" value="${esc(me?.phone || '')}"></div></div><label>رسالة</label><textarea name="message" rows="2"></textarea>
       <p class="err" id="e"></p><button class="btn gold">ابعت العرض</button></form></div>` : ''}`;
+    document.querySelectorAll('.ths img').forEach(t => t.onclick = () => { $('#gm').src = '/photo/' + t.dataset.p; document.querySelectorAll('.ths img').forEach(x => x.classList.toggle('on', x === t)); });
     const post = (p, d) => api(p, d).then(() => pages.l(id));
     if ($('#fav')) $('#fav').onclick = () => post('fav', { id });
+    document.querySelectorAll('[data-dp]').forEach(b => b.onclick = () => post('photo/delete', { listing: id, id: +b.dataset.dp }));
+    if ($('#addp')) $('#addp').onchange = async e => { try { await uploadPhotos(id, [...e.target.files].slice(0, 6 - l.photos.length)); } catch (x) { alert(x.message); } pages.l(id); };
     if ($('#sold')) $('#sold').onclick = () => post('listing/update', { id, action: 'sold' });
     if ($('#del')) $('#del').onclick = () => confirm('متأكد؟') && api('listing/update', { id, action: 'delete' }).then(() => location.hash = '#/mine');
     if ($('#of')) $('#of').onsubmit = async e => { e.preventDefault(); if (need()) return;
@@ -80,12 +99,14 @@ const pages = {
     <label>العنوان</label><input name="title" required maxlength="120" placeholder="مثال: تويوتا كورولا 2020 فبريكا">
     <label>الوصف</label><textarea name="description" rows="4"></textarea>
     <div class="row"><div><label>السعر (ج.م)</label><input name="price" type="number" required min="1"></div><div><label>المدينة</label><input name="city"></div></div>
+    <label>صور (لحد 6، بتتضغط تلقائيًا)</label><input type="file" id="photos" accept="image/*" multiple><div class="pprev" id="prev"></div>
     <label>رقم التليفون للتواصل</label><input name="phone" dir="ltr" value="${esc(me.phone)}">
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="negotiable" style="width:auto" checked> السعر قابل للتفاوض</label>
     <p class="err" id="e"></p><button class="btn gold">انشر الإعلان</button></form></div>`;
     const f = $('#f'), sync = () => $('#dealbox').style.display = f.category.value === 'rentals' ? 'none' : ''; f.onchange = sync;
-    f.onsubmit = async e => { e.preventDefault(); const d = Object.fromEntries(new FormData(f)); d.negotiable = !!f.negotiable.checked;
-      try { const r = await api('listings', d); location.hash = '#/l/' + r.id; } catch (x) { $('#e').textContent = x.message; } };
+    $('#photos').onchange = e => { $('#prev').innerHTML = [...e.target.files].slice(0, 6).map(x => `<div><img src="${URL.createObjectURL(x)}" alt=""></div>`).join(''); };
+    f.onsubmit = async e => { e.preventDefault(); const d = Object.fromEntries(new FormData(f)); delete d.photos; d.negotiable = !!f.negotiable.checked;
+      try { const r = await api('listings', d); const fl = [...$('#photos').files].slice(0, 6); if (fl.length) { $('#e').textContent = 'جاري رفع الصور...'; try { await uploadPhotos(r.id, fl); } catch (x) { alert('الإعلان اتنشر لكن في صورة مارفعتش: ' + x.message); } } location.hash = '#/l/' + r.id; } catch (x) { $('#e').textContent = x.message; } };
   },
   async login() {
     app.innerHTML = `<div class="panel narrow"><h2>تسجيل الدخول</h2><form id="f"><label>الايميل</label><input name="email" type="email" required dir="ltr"><label>كلمة السر</label><input name="password" type="password" required>
